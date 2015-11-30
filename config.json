@@ -1,0 +1,6 @@
+{
+  "lifetime": 30,
+  "replicas": 5,
+  "requests": 100,
+  "mix": 0.9
+}
