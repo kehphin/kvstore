@@ -29,7 +29,8 @@ LAST_SENT_HEARTBEAT = 0
 
 # append rpc vars
 TERM = 0
-LOG = [] # stores all msgs from client
+LOG = ['empty'] # stores all msgs from client, with an offset throwaway
+								# value so LOGs are 1-indexed
 DATA = {} # should be the same across all replicas
 COMMIT_INDEX = 0
 LOG_INDEX = 0
@@ -39,6 +40,7 @@ LAST_APPLIED = 0
 # leader vars
 NEXT_INDEX = {} # ID to next log entry index
 MATCH_INDEX = {} # ID to known log entry index replicated
+QUORUM_COUNTER
 
 
 
@@ -104,32 +106,65 @@ def handleVoteMsg(msg):
 
 def handleAppendMsg(msg):
 	global LEADER_ID
-	
+	global LOG
+	global LAST_APPLIED
+
 	STATE = 'Follower'
 	LEADER_ID = msg['leader']
 	LAST_LEADER_TIMESTAMP = getTimestamp()
 
-	if (msg['data']['nextIndex'] == LAST_APPLIED + 1):
-		# we good
-		sock.send(json.dumps({'src': my_id, 
-													'dst': msg['src'], 
-													'leader': msg['src'],
-				                  'type': 'appendResponse', 
-				                  'data': {
-				                  	'status': 'ok'
-				                  }}) + '\n')
+
+	# empty append message means that its a heartbeat appendrpc
+	if (len(msg['data']['entries']) == 0):
+		if (msg['data']['nextIndex'] == LAST_APPLIED + 1):
+			# we good
+			sock.send(json.dumps({'src': my_id, 
+														'dst': msg['src'], 
+														'leader': msg['src'],
+					                  'type': 'appendResponse', 
+					                  'data': {
+					                  	'status': 'ok',
+					                  	'currLastApplied': LAST_APPLIED
+					                  }}) + '\n')
+		else:
+			# send back rejection message to decrement next rpc by 1
+			sock.send(json.dumps({'src': my_id, 
+														'dst': msg['src'], 
+														'leader': msg['src'],
+					                  'type': 'appendResponse', 
+					                  'data': {
+					                  	'status': 'fail',
+					                  	'currLastApplied': LAST_APPLIED
+					                  }}) + '\n')
+
 	else:
-		# send back rejection message to decrement next rpc by 1
+		# entries is greater than 0, meaning its a put appendrpc
+		nextIndex = msg['data']['nextIndex']
+
+		# append all entries to LOG, clobbering any unresponded entries if necessary
+		for message in msg['data']['entries']:
+			if (nextIndex >= len(LOG)):
+				LOG.append(message)
+				LAST_APPLIED = LAST_APPLIED + 1
+			else:
+				LOG[nextIndex] = msg
+			nextIndex = nextIndex + 1
+
 		sock.send(json.dumps({'src': my_id, 
 													'dst': msg['src'], 
 													'leader': msg['src'],
 				                  'type': 'appendResponse', 
 				                  'data': {
-				                  	'status': 'fail',
+				                  	'status': 'ok',
 				                  	'currLastApplied': LAST_APPLIED
 				                  }}) + '\n')
 
+
+
+
+
 def handleAppendResponseMsg(msg):
+	global NEXT_INDEX
 	# if failed, we resend with the last known successful log index from resp
 	if (msg['data']['status'] == 'fail'):
 		NEXT_INDEX[msg['src']] == msg['data']['currLastApplied'] + 1
@@ -144,7 +179,13 @@ def handleAppendResponseMsg(msg):
 
 	else:
 		# we good
-		print 'Replica ' + msg['src'] + ' has agreed with nextIndex of ' + `NEXT_INDEX[msg['src']]`
+
+		followerLastApplied = msg['data']['currLastApplied'] + 1
+		print 'Replica ' + msg['src'] + ' has agreed with nextIndex of ' + `followerLastApplied`
+
+
+		NEXT_INDEX[msg['src']] = followerLastApplied
+
 
 # assumes that the leader has received the get
 def handleClientGet(msg):
@@ -163,29 +204,44 @@ def handleClientGet(msg):
 
 # assumes that the leader has received the put
 def handleClientPut(msg):
-	DATA[msg['key']] = msg['value']
-	LOG.append(msg)
+	global LOG
+	global LAST_APPLIED
 
+	#DATA[msg['key']] = msg['value']
+	LOG.append(msg)
+	LAST_APPLIED = LAST_APPLIED + 1
+
+	# send put to all other replicas and wait for quorum
+	sendAppend()
+
+	
+
+	"""
 	sock.send(json.dumps({'src': my_id, 
 												'dst': msg['src'], 
 												'leader': my_id,
 			                  'type': 'ok', 
 			                  'MID': msg['MID']
 			                  }) + '\n')
+	"""
 
 
 def sendAppend():	
 	global LAST_SENT_HEARTBEAT
 
 	LAST_SENT_HEARTBEAT = getTimestamp()
+
 	for replica in replica_ids:
 		sock.send(json.dumps({'src': my_id, 
 													'dst': replica, 
 													'leader': my_id,
 				                  'type': 'append', 
 				                  'data': {
-				                  	'nextIndex': NEXT_INDEX[replica]
+				                  	'nextIndex': NEXT_INDEX[replica],
+				                  	'entries': LOG[NEXT_INDEX[replica]:]
 				                  }}) + '\n')
+
+		print 'Sending ' + `LOG[NEXT_INDEX[replica]:]` + ' from leader ' + my_id + ' to replica ' + replica 
 
 def sendRedirectMsg(msg):
 	sock.send(json.dumps({'src': my_id,
@@ -227,7 +283,7 @@ while True:
 				if msg['type'] == 'get':
 					handleClientGet(msg)
 
-				# handle a client get request
+				# handle a client put request
 				if msg['type'] == 'put':
 					handleClientPut(msg)
 
