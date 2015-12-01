@@ -14,7 +14,7 @@ def getTimestamp():
 
 # global vars
 QUORUM = math.floor(((len(replica_ids) + 1) / 2 ) + 1)
-TERM = 0
+
 LEADER_TIMEOUT = 1000 # 1 second
 LAST_LEADER_TIMESTAMP = getTimestamp() 
 IS_TIMEDOUT_FROM_LEADER = False
@@ -26,6 +26,19 @@ STATE = 'Follower'
 RANDOM_ELECTION_WAIT_ENDING = None
 LEADER_HEARTBEAT_RATE = 100
 LAST_SENT_HEARTBEAT = 0
+
+# append rpc vars
+TERM = 0
+LOG = [] # stores all msgs from client
+DATA = {} # should be the same across all replicas
+COMMIT_INDEX = 0
+LOG_INDEX = 0
+LEADER_ID = None
+LAST_APPLIED = 0
+
+# leader vars
+NEXT_INDEX = {} # ID to next log entry index
+MATCH_INDEX = {} # ID to known log entry index replicated
 
 
 
@@ -52,7 +65,7 @@ def startElection():
 	global LAST_ELECTION_TIMESTAMP
 	global RANDOM_ELECTION_WAIT_ENDING 
 	global LEADER_VOTES
-	global CUR
+	global CURRENT_TERM_VOTE
 
 	TERM = TERM + 1
 	LEADER_VOTES = 1
@@ -75,24 +88,111 @@ def handleVoteMsg(msg):
 	global LEADER_VOTES
 	global STATE
 	global IS_TIMEDOUT_FROM_LEADER
+	global NEXT_INDEX
 
 	LEADER_VOTES = LEADER_VOTES + 1
 
 	if (LEADER_VOTES >= QUORUM):
 		IS_TIMEDOUT_FROM_LEADER = False
 		STATE = 'Leader'
-		sendHeartbeat()
+		# initialize NEXT_INDEX log to its LAST_APPLIED
+		for replica in replica_ids:
+			NEXT_INDEX[replica] = LAST_APPLIED + 1
+
+		sendAppend()
 		print 'we are the new leader! ' + my_id
 
-def sendHeartbeat():
+def handleAppendMsg(msg):
+	global LEADER_ID
+	
+	STATE = 'Follower'
+	LEADER_ID = msg['leader']
+	LAST_LEADER_TIMESTAMP = getTimestamp()
+
+	if (msg['data']['nextIndex'] == LAST_APPLIED + 1):
+		# we good
+		sock.send(json.dumps({'src': my_id, 
+													'dst': msg['src'], 
+													'leader': msg['src'],
+				                  'type': 'appendResponse', 
+				                  'data': {
+				                  	'status': 'ok'
+				                  }}) + '\n')
+	else:
+		# send back rejection message to decrement next rpc by 1
+		sock.send(json.dumps({'src': my_id, 
+													'dst': msg['src'], 
+													'leader': msg['src'],
+				                  'type': 'appendResponse', 
+				                  'data': {
+				                  	'status': 'fail',
+				                  	'currLastApplied': LAST_APPLIED
+				                  }}) + '\n')
+
+def handleAppendResponseMsg(msg):
+	# if failed, we resend with the last known successful log index from resp
+	if (msg['data']['status'] == 'fail'):
+		NEXT_INDEX[msg['src']] == msg['data']['currLastApplied'] + 1
+
+		sock.send(json.dumps({'src': my_id, 
+													'dst': replica, 
+													'leader': my_id,
+				                  'type': 'append', 
+				                  'data': {
+				                  	'nextIndex': NEXT_INDEX[[msg['src']]]
+				                  }}) + '\n')
+
+	else:
+		# we good
+		print 'Replica ' + msg['src'] + ' has agreed with nextIndex of ' + `NEXT_INDEX[msg['src']]`
+
+# assumes that the leader has received the get
+def handleClientGet(msg):
+	entry = ''
+
+	if msg['key'] in DATA:
+		entry = DATA[msg['key']]
+
+	sock.send(json.dumps({'src': my_id, 
+												'dst': msg['src'], 
+												'leader': my_id,
+			                  'type': 'ok', 
+			                  'MID': msg['MID'],
+			                  'value': entry
+			                  }) + '\n')
+
+# assumes that the leader has received the put
+def handleClientPut(msg):
+	DATA[msg['key']] = msg['value']
+	LOG.append(msg)
+
+	sock.send(json.dumps({'src': my_id, 
+												'dst': msg['src'], 
+												'leader': my_id,
+			                  'type': 'ok', 
+			                  'MID': msg['MID']
+			                  }) + '\n')
+
+
+def sendAppend():	
 	global LAST_SENT_HEARTBEAT
 
 	LAST_SENT_HEARTBEAT = getTimestamp()
 	for replica in replica_ids:
-		sock.send(json.dumps({'src': my_id, 'dst': replica, 'leader': my_id,
-				                  'type': 'heartbeat'}) + '\n')
+		sock.send(json.dumps({'src': my_id, 
+													'dst': replica, 
+													'leader': my_id,
+				                  'type': 'append', 
+				                  'data': {
+				                  	'nextIndex': NEXT_INDEX[replica]
+				                  }}) + '\n')
 
-
+def sendRedirectMsg(msg):
+	sock.send(json.dumps({'src': my_id,
+												'dst': msg['src'], 
+												'leader': LEADER_ID,
+				                'type': 'redirect', 
+				                'MID': msg['MID']}) + '\n')
 
 # Connect to the network. All messages to/from other replicas and clients will
 # occur over this socket
@@ -119,25 +219,38 @@ while True:
 			# u'value': u'cf52a3ceb2de663d19b5516bda582426', u'key': u'VS45EDCU5XSDO3I1MGWQASAW7P31SRJA', 
 			# u'type': u'put', u'leader': u'FFFF'}
 
-			# For now, respond to all client messages with a type=fail response
-			if msg['type'] in ['get', 'put']:
-				sock.send(json.dumps({'src': my_id, 'dst': msg['src'], 'leader': 'FFFF',
-				                      'type': 'fail', 'MID': msg['MID']}) + '\n')
+			if msg['type'] in ['get', 'put'] and STATE is not 'Leader':
+				sendRedirectMsg(msg)
 
-			# new election process
-			if msg['type'] == 'elect':
-				handleElectionMsg(msg)
+			else:
+				# handle a client get request
+				if msg['type'] == 'get':
+					handleClientGet(msg)
 
-			if msg['type'] == 'heartbeat':
-				print 'Received heartbeat at ' + my_id + ' from ' + msg['src']
-				STATE = 'Follower'
-				LAST_LEADER_TIMESTAMP = getTimestamp()
+				# handle a client get request
+				if msg['type'] == 'put':
+					handleClientPut(msg)
 
-			# handle vote
-			if msg['type'] == 'vote':
-				handleVoteMsg(msg)
+				# new election process
+				if msg['type'] == 'elect':
+					handleElectionMsg(msg)
+
+				# appendRPC message
+				if msg['type'] == 'append':
+					print 'Received append at ' + my_id + ' from ' + msg['src']
+					handleAppendMsg(msg)
+
+				# appendRPC Response to leader
+				if msg['type'] == 'appendResponse':
+					print 'Received appendResponse at ' + my_id + ' from ' + msg['src']
+					handleAppendResponseMsg(msg)
+
+				# handle vote
+				if msg['type'] == 'vote':
+					handleVoteMsg(msg)
 		
+	# send heartbeat after every LEADER_HEARTBEAT_RATE
 	if STATE == 'Leader' and getTimestamp() - LEADER_HEARTBEAT_RATE > LAST_SENT_HEARTBEAT:
 		print 'about to send heartbeat'
-		sendHeartbeat()
+		sendAppend()
 
