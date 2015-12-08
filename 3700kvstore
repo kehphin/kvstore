@@ -24,7 +24,7 @@ LEADER_VOTES = 0
 CURRENT_TERM_VOTE = None
 STATE = 'Follower'
 RANDOM_ELECTION_WAIT_ENDING = None
-LEADER_HEARTBEAT_RATE = 100
+LEADER_HEARTBEAT_RATE = 10
 LAST_SENT_HEARTBEAT = 0
 
 # append rpc vars
@@ -153,7 +153,7 @@ def handleAppendMsg(msg):
 				LOG.append(message)
 				LAST_APPLIED = LAST_APPLIED + 1
 			else:
-				LOG[nextIndex] = msg
+				LOG[nextIndex] = message
 			nextIndex = nextIndex + 1
 
 		sock.send(json.dumps({'src': my_id, 
@@ -186,13 +186,9 @@ def handleAppendResponseMsg(msg):
 		# we good
 
 		followerLastApplied = msg['data']['currLastApplied'] + 1
-		print 'Replica ' + msg['src'] + ' has agreed with nextIndex of ' + `followerLastApplied`
-
-		print '===== ' + `NEXT_INDEX[msg['src']]` + ' ==== ' + `msg['data']['currLastApplied']`
 
 		# for loop is upper bound exclusive
-		for i in range(NEXT_INDEX[msg['src']], msg['data']['currLastApplied'] + 1):
-			print '===========reached leader handle apprend response============'
+		for i in range(NEXT_INDEX[msg['src']], followerLastApplied):
 
 			QUORUM_COUNTER[i] = QUORUM_COUNTER[i] + 1
 
@@ -234,11 +230,11 @@ def handleClientGet(msg):
 		entry = DATA[msg['key']]
 
 	sock.send(json.dumps({'src': my_id, 
-												'dst': msg['src'], 
-												'leader': my_id,
-			                  'type': 'ok', 
-			                  'MID': msg['MID'],
-			                  'value': entry
+							'dst': msg['src'], 
+							'leader': my_id,
+			                'type': 'ok', 
+			                'MID': msg['MID'],
+			                'value': entry
 			                  }) + '\n')
 
 # assumes that the leader has received the put
@@ -308,8 +304,6 @@ while True:
 			# u'value': u'cf52a3ceb2de663d19b5516bda582426', u'key': u'VS45EDCU5XSDO3I1MGWQASAW7P31SRJA', 
 			# u'type': u'put', u'leader': u'FFFF'}
 
-
-			print `my_id` + ': ' + `DATA`
 
 			if msg['type'] in ['get', 'put'] and STATE is not 'Leader':
 				sendRedirectMsg(msg)
