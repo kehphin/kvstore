@@ -3,6 +3,8 @@
 import getpass, os, argparse, atexit
 from run import Simulation
 
+VERSION = '0.2'
+
 LEADERBOARD_OUTPUT = '/course/cs3700f15/stats/project5/'
 
 # Constants for tuning the difficulty of the tests
