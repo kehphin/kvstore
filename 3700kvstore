@@ -41,6 +41,7 @@ LAST_APPLIED = 0 # index of the most recent element added to the log
 NEXT_INDEX = {} # ID to next log entry index
 MATCH_INDEX = {} # ID to known log entry index replicated
 QUORUM_COUNTER = {} # dict of messages to the votes they have
+IN_BETWEEN_QUORUM_COUNTER = {}
 REPLICA_TIMEOUT = {} #dict mapping replica ids to the timestamp when we last heard from them
 
 MESSAGE_QUEUE = [] #queue of messages that we received when we had no leader
@@ -93,11 +94,11 @@ def startElection():
 
 	for replica in replica_ids:
 		sock.send(json.dumps({'src': my_id, 'dst': replica, 'leader': my_id,
-					                  'type': 'elect', 'data': {'lastCommmited' : COMMIT_INDEX}}) + '\n')
+					                  'type': 'elect', 'data': {'lastCommmited' : COMMIT_INDEX, 'logLength': LAST_APPLIED}}) + '\n')
 		sock.send(json.dumps({'src': my_id, 'dst': replica, 'leader': my_id,
-					                  'type': 'elect', 'data': {'lastCommmited' : COMMIT_INDEX}}) + '\n')
+					                  'type': 'elect', 'data': {'lastCommmited' : COMMIT_INDEX, 'logLength': LAST_APPLIED}}) + '\n')
 		sock.send(json.dumps({'src': my_id, 'dst': replica, 'leader': my_id,
-					                  'type': 'elect', 'data': {'lastCommmited' : COMMIT_INDEX}}) + '\n')
+					                  'type': 'elect', 'data': {'lastCommmited' : COMMIT_INDEX, 'logLength': LAST_APPLIED}}) + '\n')
 
 def handleElectionMsg(msg):
 	global CURRENT_TERM_VOTE
@@ -123,8 +124,6 @@ def handleElectionMsg(msg):
 					                  'type': 'vote'}) + '\n')
 			sock.send(json.dumps({'src': my_id, 'dst': msg['src'], 'leader': msg['src'],
 					                  'type': 'vote'}) + '\n')
-		#else:
-			#print "ignored vote from " + msg['src'] + " at " + `my_id`  + " b/c our index is " + `COMMIT_INDEX` + " and theres is " + `msg['data']['lastCommmited']`
 
 
 def handleVoteMsg(msg):
@@ -133,6 +132,7 @@ def handleVoteMsg(msg):
 	global NEXT_INDEX
 	global LEADER_ID
 	global TERM
+	global IN_BETWEEN_QUORUM_COUNTER
 
 	if (STATE == 'Candidate'):
 		if (msg['src'] not in LEADER_VOTES):	
@@ -149,7 +149,17 @@ def handleVoteMsg(msg):
 			for replica in replica_ids:
 				REPLICA_TIMEOUT[replica] = {'lastHeardFrom' : getTimestamp()}
 
-			#TERM = TERM + 10
+			if (COMMIT_INDEX == LAST_APPLIED):
+				IN_BETWEEN_QUORUM_COUNTER = None
+			else:
+				for i in range(COMMIT_INDEX + 1, LAST_APPLIED + 1):
+					#print "setting the quourm counter for " + `i` + " to be one at the new leader"
+					QUORUM_COUNTER[i] = 1
+					IN_BETWEEN_QUORUM_COUNTER[i] = [my_id]
+
+
+
+			TERM = TERM + 1
 
 			sendAppend()
 			sendAppend()
@@ -224,6 +234,8 @@ def handleAppendResponseMsg(msg):
 	global NEXT_INDEX
 	global QUORUM_COUNTER
 	global REPLICA_TIMEOUT
+	global IN_BETWEEN_QUORUM_COUNTER
+	global COMMIT_INDEX
 
 	REPLICA_TIMEOUT[msg['src']]['lastHeardFrom'] = getTimestamp()
 
@@ -242,12 +254,36 @@ def handleAppendResponseMsg(msg):
 
 		followerLastApplied = msg['data']['currLastApplied'] + 1
 
+		
+		if (IN_BETWEEN_QUORUM_COUNTER is not None):
+			for key in IN_BETWEEN_QUORUM_COUNTER.keys():
+				if (key < followerLastApplied and msg['src'] not in IN_BETWEEN_QUORUM_COUNTER[key]):
+					IN_BETWEEN_QUORUM_COUNTER[key].append(msg['src'])
+					QUORUM_COUNTER[key] = QUORUM_COUNTER[key] + 1
+					if QUORUM_COUNTER[key] == QUORUM:
+
+						messageFromClient = LOG[key]
+						# data is committed
+						DATA[messageFromClient['key']] = messageFromClient['value']
+
+						#print 'committing message: ' + `key` + ' at ' + `my_id`
+
+						COMMIT_INDEX = COMMIT_INDEX + 1
+
+						del IN_BETWEEN_QUORUM_COUNTER[key]
+						if len(IN_BETWEEN_QUORUM_COUNTER) == 0:
+							IN_BETWEEN_QUORUM_COUNTER = None
+							#print 'killing dah bitch!!!!!!!!!!!!!!!!'
+		
+
 		# for loop is upper bound exclusive
 		for i in range(NEXT_INDEX[msg['src']], followerLastApplied):
-			QUORUM_COUNTER[i] = QUORUM_COUNTER[i] + 1
+			if (i > COMMIT_INDEX): #only would have it if we had commited message, leader died, we became leader, and then another replica put it in their logs, in which case it has already beem commited and can be ignored
+				#print i
+				QUORUM_COUNTER[i] = QUORUM_COUNTER[i] + 1
 
-			if QUORUM_COUNTER[i] == QUORUM:
-				commitPut(i)
+				if QUORUM_COUNTER[i] == QUORUM:
+					commitPut(i)
 			
 		NEXT_INDEX[msg['src']] = followerLastApplied
 
@@ -302,6 +338,8 @@ def handleClientPut(msg):
 
 	# put msg in quorum counter, give one vote for ourselves
 	QUORUM_COUNTER[LAST_APPLIED] = 1
+
+	#print "adding " + `LAST_APPLIED` + ' to quorum counter'
 
 	# send put to all other replicas and wait for quorum
 	sendAppend()
@@ -364,6 +402,8 @@ while True:
 
 	# Check to see if we have timed out from the leader
 	checkLastLeaderTimestamp()
+
+	#print `CURRENT_TERM_VOTE` +  ' ' + `my_id`
 
 	if STATE is 'Leader':
 		checkReplicaTimeouts()
