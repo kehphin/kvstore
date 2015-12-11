@@ -3,8 +3,6 @@
 import getpass, os, argparse, atexit
 from run import Simulation
 
-VERSION = '0.2'
-
 LEADERBOARD_OUTPUT = '/course/cs3700f15/stats/project5/'
 
 # Constants for tuning the difficulty of the tests
@@ -27,42 +25,41 @@ sim = None
 # Attempt to kill child processes regardless of how Python shuts down (e.g. via an exception or ctrl-C)
 @atexit.register
 def kill_simulation():
-        if sim:
-                try: sim.shutdown()
-                except: pass
+    if sim:
+        try: sim.shutdown()
+        except: pass
 
 def run_test(filename, description, requests, replicas, mayfail, tolerance, latency, log=None):
-        global sim
+    global sim
         
-        if args.config_dir: sim = Simulation(os.path.join(args.config_dir, filename))
-        else: sim = Simulation(filename)
+    if args.config_dir: sim = Simulation(os.path.join(args.config_dir, filename))
+    else: sim = Simulation(filename)
 
-	sim.run()
-	stats = sim.get_stats()	
-        sim.shutdown()
-
-        sim = None
+    sim.run()
+    stats = sim.get_stats()    
+    sim.shutdown()
+    sim = None
         
-	pf = 'PASS'
-	if stats.incorrect:
-		print '\t\tTesting error: >0 incorrect responses to get()'
-		pf = 'FAIL'
-	elif stats.failed_get > requests * mayfail or stats.failed_put > requests * mayfail:
-		print '\t\tTesting error: Too many type=fail responses to client requests'
-		pf = 'FAIL'
-	elif stats.total_msgs > requests * replicas * 2 * tolerance:
-		print '\t\tTesting error: Too many total messages'
-		pf = 'FAIL'
-	elif stats.mean_latency > latency:
-		print '\t\tTesting error: Latency of requests is too high'
-		pf = 'FAIL'
+    pf = 'PASS'
+    if stats.incorrect:
+        print '\t\tTesting error: >0 incorrect responses to get()'
+        pf = 'FAIL'
+    elif stats.failed_get > requests * mayfail or stats.failed_put > requests * mayfail:
+        print '\t\tTesting error: Too many type=fail responses to client requests'
+        pf = 'FAIL'
+    elif stats.total_msgs > requests * replicas * 2 * tolerance:
+        print '\t\tTesting error: Too many total messages'
+        pf = 'FAIL'
+    elif stats.mean_latency > latency:
+        print '\t\tTesting error: Latency of requests is too high'
+        pf = 'FAIL'
 
-        if pf == 'PASS' and log:
-                log.write('%s %i %i %i %f %f\n' % (filename, stats.total_msgs, stats.failed_get, stats.failed_put,
-                                                   stats.mean_latency, stats.median_latency))
+    if pf == 'PASS' and log:
+        log.write('%s %i %i %i %f %f\n' % (filename, stats.total_msgs, stats.failed_get, stats.failed_put,
+                                           stats.mean_latency, stats.median_latency))
 
-	print '\t%-40s\t[%s]' % (description, pf)
-	return pf == 'PASS'
+    print '\t%-40s\t[%s]' % (description, pf)
+    return pf == 'PASS'
 
 trials = []
 print 'Basic tests (5 replicas, 30 seconds, 500 requests):'
