@@ -24,9 +24,9 @@ RANDOM_ELECTION_WAIT_ENDING = None #If our election failed, use this to start a 
 LEADER_HEARTBEAT_RATE = 20 # How often a leader should send a heartbeat append message
 LAST_SENT_HEARTBEAT = 0 # When we last sent a heartbeat message 
 REPLICA_TIMEOUT_LENGTH = 1500 #After how long we should time out a replica if we havent heard from it
-NEXT_VOTE_FOR_ID = None
-NEXT_VOTE_COMMIT_INDEX = None
-IS_TIMED_OUT_FROM_LEADER = False
+NEXT_VOTE_FOR_ID = None #If our election fails, this is who we should vote for next time
+NEXT_VOTE_COMMIT_INDEX = None #This is how many entries the furthest replica along has commited
+IS_TIMED_OUT_FROM_LEADER = False #Set to true when we have times out from leader
 LAST_LEADER = None #Id of the last leader that has gone offline
 TERM_DURING_LAST_LEADER = 0 #Term we were in when we had that last leader
 
@@ -43,11 +43,14 @@ LAST_APPLIED = 0 # index of the most recent element added to the log
 NEXT_INDEX = {} # ID to next log entry index
 MATCH_INDEX = {} # ID to known log entry index replicated
 QUORUM_COUNTER = {} # dict of messages to the votes they have
-IN_BETWEEN_QUORUM_COUNTER = {}
 REPLICA_TIMEOUT = {} #dict mapping replica ids to the timestamp when we last heard from them
 
 MESSAGE_QUEUE = [] #queue of messages that we received when we had no leader
 
+
+if (my_id == '0002'):
+	LOG = ['empty', 1, 2, 3, 4,5,6,7,8,9]
+	LAST_APPLIED = 9
 
 def checkLastLeaderTimestamp():
 	global RANDOM_ELECTION_WAIT_ENDING 
@@ -67,7 +70,6 @@ def checkLastLeaderTimestamp():
 		print "Our leader " + `LEADER_ID` + " has timed out " + `my_id`
 		LEADER_ID = None
 		if (STATE is 'Candidate'): #timed out from election
-			#print 'first election didnt work, random timeout ' + `my_id`
 			print 'I will vote for ' + `NEXT_VOTE_FOR_ID` + ' from ' + `my_id`
 
 			if (NEXT_VOTE_FOR_ID == my_id): #I am supposed to be next leader
@@ -109,7 +111,7 @@ def startElection():
 def sendElectionMessageTo(dest):
 	for i in range(0, 3):
 		sock.send(json.dumps({'src': my_id, 'dst': dest, 'leader': my_id,
-					                  'type': 'elect', 'data': {'lastCommmited' : COMMIT_INDEX, 'logLength': LAST_APPLIED}}) + '\n')
+					                  'type': 'elect', 'data': {'lastCommmited' : COMMIT_INDEX, 'logLen': LAST_APPLIED}}) + '\n')
 
 def handleElectionMsg(msg):
 	global CURRENT_TERM_VOTE
@@ -143,7 +145,6 @@ def handleVoteMsg(msg):
 	global NEXT_INDEX
 	global LEADER_ID
 	global TERM
-	global IN_BETWEEN_QUORUM_COUNTER
 	global replica_ids
 	global LAST_LEADER
 
@@ -161,20 +162,14 @@ def handleVoteMsg(msg):
 				replica_ids.remove(LAST_LEADER)
 
 			for replica in replica_ids:
-				NEXT_INDEX[replica] = LAST_APPLIED + 1
+				NEXT_INDEX[replica] = COMMIT_INDEX + 1
 
 			for replica in replica_ids:
 				REPLICA_TIMEOUT[replica] = {'lastHeardFrom' : getTimestamp()}
 
-			if (COMMIT_INDEX == LAST_APPLIED):
-				IN_BETWEEN_QUORUM_COUNTER = None
-			else:
-				for i in range(COMMIT_INDEX + 1, LAST_APPLIED + 1):
-					print "setting the quourm counter for " + `i` + " to be one at the new leader"
-					QUORUM_COUNTER[i] = 1
-					IN_BETWEEN_QUORUM_COUNTER[i] = [my_id]
-
-
+			for i in range(COMMIT_INDEX + 1, LAST_APPLIED + 1):
+				print "setting the quourm counter for " + `i` + " to be one at the new leader"
+				QUORUM_COUNTER[i] = 1
 
 			TERM = TERM + 1
 
@@ -227,14 +222,8 @@ def handleAppendMsg(msg):
 
 	# empty append message means that its a heartbeat appendrpc
 	if (len(msg['data']['entries']) == 0):
-		if (msg['data']['nextIndex'] == LAST_APPLIED + 1):
-			# we good
-			data = {'status': 'ok', 'currLastApplied': LAST_APPLIED}
-			sendMessageToReplica(msg['src'], 'appendResponse', data)
-		else:
-			# send back rejection message to decrement next rpc by 1
-			data = {'status': 'fail', 'currLastApplied': LAST_APPLIED}
-			sendMessageToReplica(msg['src'], 'appendResponse', data)
+		data = {'status': 'ok', 'currLastApplied': LAST_APPLIED}
+		sendMessageToReplica(msg['src'], 'appendResponse', data)
 
 	else:
 		# entries is greater than 0, meaning its a put appendrpc
@@ -257,50 +246,23 @@ def handleAppendResponseMsg(msg):
 	global NEXT_INDEX
 	global QUORUM_COUNTER
 	global REPLICA_TIMEOUT
-	global IN_BETWEEN_QUORUM_COUNTER
 	global COMMIT_INDEX
 
 	REPLICA_TIMEOUT[msg['src']]['lastHeardFrom'] = getTimestamp()
 
-	# if failed, we resend with the last known successful log index from resp
-	if (msg['data']['status'] == 'fail'):
-		NEXT_INDEX[msg['src']] == msg['data']['currLastApplied'] + 1
-		data = {'nextIndex': NEXT_INDEX[msg['src']],
-				'entries': LOG[NEXT_INDEX[msg['src']]:],
-				'commitIndex': COMMIT_INDEX,
-				'term': TERM}
+	followerLastApplied = min(msg['data']['currLastApplied'] + 1, len(LOG))
+	print 'At ' + `my_id` + ' from ' + msg['src'] + ': ' + `msg['data']['currLastApplied'] + 1` + ', ' + `len(LOG)`
+	
+	# for loop is upper bound exclusive
+	for i in range(NEXT_INDEX[msg['src']], followerLastApplied):
+		if (i > COMMIT_INDEX): #only would have it if we had commited message, leader died, we became leader, and then another replica put it in their logs, in which case it has already beem commited and can be ignored
+			print i
+			QUORUM_COUNTER[i] = QUORUM_COUNTER[i] + 1
 
-		sendMessageToReplica(msg['src'], 'append', data)
-
-	else:
-		# we good
-
-		followerLastApplied = msg['data']['currLastApplied'] + 1
-
+			if QUORUM_COUNTER[i] == QUORUM:
+				commitPut(i)
 		
-		if (IN_BETWEEN_QUORUM_COUNTER is not None):
-			for key in IN_BETWEEN_QUORUM_COUNTER.keys():
-				if (key < followerLastApplied and msg['src'] not in IN_BETWEEN_QUORUM_COUNTER[key]):
-					IN_BETWEEN_QUORUM_COUNTER[key].append(msg['src'])
-					QUORUM_COUNTER[key] = QUORUM_COUNTER[key] + 1
-					if QUORUM_COUNTER[key] == QUORUM:
-						commitPut(key)
-						del IN_BETWEEN_QUORUM_COUNTER[key]
-						if len(IN_BETWEEN_QUORUM_COUNTER) == 0:
-							IN_BETWEEN_QUORUM_COUNTER = None
-							print 'killing dah bitch!!!!!!!!!!!!!!!!'
-		
-
-		# for loop is upper bound exclusive
-		for i in range(NEXT_INDEX[msg['src']], followerLastApplied):
-			if (i > COMMIT_INDEX): #only would have it if we had commited message, leader died, we became leader, and then another replica put it in their logs, in which case it has already beem commited and can be ignored
-				print i
-				QUORUM_COUNTER[i] = QUORUM_COUNTER[i] + 1
-
-				if QUORUM_COUNTER[i] == QUORUM:
-					commitPut(i)
-			
-		NEXT_INDEX[msg['src']] = followerLastApplied
+	NEXT_INDEX[msg['src']] = followerLastApplied
 
 
 def commitPut(msgId):
@@ -486,7 +448,5 @@ while True:
 		
 	# send heartbeat after every LEADER_HEARTBEAT_RATE
 	if STATE == 'Leader' and getTimestamp() - LEADER_HEARTBEAT_RATE > LAST_SENT_HEARTBEAT:
-	#if STATE == 'Leader':
-		print 'about to send heartbeat'
 		sendAppend()
 
