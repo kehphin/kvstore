@@ -1,0 +1,13 @@
+This project took a lot of planning - we approached the problem in small pieces to not get overwhelmed. Overall, we met up about 4 times and partner programmed, bouncing ideas off each other and catching each other's mistakes. We also each worked on the project independently as well in between these coding sessions. For testing, we used a ton of print lines to make sure that heartbeats and elections were working correctly, and that each replica had the correct data in its dictionary. 
+
+At a high level, we followed the RAFT paper's implementation fairly closely, taking advantage of the python starter code provided to us. 
+
+First, we hardcoded a leader and followers, and made sure that our heartbeats could be read and responded to by each replica. This was key because the heartbeat is the key part of communication between nodes. 
+
+Then, we added the ability to redirect and receive get() and put() messages, without actually storing the data.
+
+After this, we implemented the actual leader election - this was tough, especially when our election packets were dropped. We made sure to change the term when a new leader was elected, and also randomize the timeout between 100 and 300 ms. There were a lot of nuances to establish a quorum, which included setting a quorum timeout, as well as comparing the length of each replica's log in order to select the leader that had the longest log.
+
+With the leader in place, and the functionality to receive client requests, we finally implemented the append messages that would inform a follower which entries to append in its data dictionary (state machine)
+
+Following this, it was just a matter of going through all the tests one by one, and making small fixes for corner cases until we passed it.
